@@ -1,4 +1,5 @@
 node_modules/
 auth/
+sessions/
 .env
 npm-debug.log*

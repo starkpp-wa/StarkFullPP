@@ -1,7 +1,15 @@
 import express from "express";
 import multer from "multer";
 import pino from "pino";
-import { rm } from "fs/promises";
+
+import {
+    mkdir,
+    rm
+} from "fs/promises";
+
+import {
+    randomBytes
+} from "crypto";
 
 import makeWASocket, {
     useMultiFileAuthState,
@@ -11,58 +19,255 @@ import makeWASocket, {
 
 import { updateFullPP } from "./fullpp.js";
 
+
 const app = express();
 
-const PORT = process.env.PORT || 3000;
-const AUTH_DIR = "./auth";
 
-const upload = multer({
-    storage: multer.memoryStorage(),
-    limits: {
-        fileSize: 15 * 1024 * 1024
+const PORT =
+    process.env.PORT || 3000;
+
+
+// ========================================
+// CONFIG
+// ========================================
+
+const SESSIONS_DIR =
+    "./sessions";
+
+
+// Maximum simultaneous WhatsApp users.
+//
+// Change this later if necessary.
+
+const MAX_SESSIONS = 3;
+
+
+// How long an unused session may live.
+
+const SESSION_TIMEOUT_MS =
+    10 * 60 * 1000;
+
+
+// Browser cookie name.
+
+const SESSION_COOKIE =
+    "starkpp_session";
+
+
+// ========================================
+// EXPRESS
+// ========================================
+
+app.use(
+    express.json()
+);
+
+
+// ========================================
+// UPLOAD
+// ========================================
+
+const upload =
+    multer({
+
+        storage:
+            multer.memoryStorage(),
+
+        limits: {
+
+            fileSize:
+                15 * 1024 * 1024
+        }
+
+    });
+
+
+// ========================================
+// SESSION STORE
+// ========================================
+//
+// Every browser/user gets a unique token.
+//
+// Map:
+// token -> session
+//
+// ========================================
+
+const sessions =
+    new Map();
+
+
+// ========================================
+// COOKIE
+// ========================================
+
+function getSessionToken(req) {
+
+    const cookieHeader =
+        req.headers.cookie || "";
+
+
+    const cookies =
+        cookieHeader
+            .split(";")
+            .map(
+                item =>
+                    item.trim()
+            )
+            .filter(Boolean);
+
+
+    for (const cookie of cookies) {
+
+        const separator =
+            cookie.indexOf("=");
+
+
+        if (separator === -1) {
+            continue;
+        }
+
+
+        const name =
+            cookie.slice(
+                0,
+                separator
+            );
+
+
+        const value =
+            cookie.slice(
+                separator + 1
+            );
+
+
+        if (
+            name ===
+            SESSION_COOKIE
+        ) {
+
+            return value;
+        }
     }
-});
-
-app.use(express.json());
-app.use(express.static("public"));
 
 
-// ========================================
-// STATE
-// ========================================
-
-let client = null;
-
-let connected = false;
-let busy = false;
-
-let socketReady = false;
-
-let pairingCode = null;
-
-let starting = false;
-let cleaningUp = false;
-
-let sessionTimer = null;
+    return null;
+}
 
 
 // ========================================
-// DELETE AUTH
+// CREATE RANDOM TOKEN
 // ========================================
 
-async function deleteAuth() {
+function createToken() {
+
+    return randomBytes(32)
+        .toString("hex");
+}
+
+
+// ========================================
+// SET COOKIE
+// ========================================
+
+function setSessionCookie(
+    res,
+    token
+) {
+
+    let cookie =
+        `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`;
+
+
+    if (
+        process.env.RENDER ===
+        "true"
+    ) {
+
+        cookie +=
+            "; Secure";
+    }
+
+
+    res.setHeader(
+        "Set-Cookie",
+        cookie
+    );
+}
+
+
+// ========================================
+// SESSION MIDDLEWARE
+// ========================================
+
+app.use(
+    (req, res, next) => {
+
+        let token =
+            getSessionToken(req);
+
+
+        if (!token) {
+
+            token =
+                createToken();
+
+
+            setSessionCookie(
+                res,
+                token
+            );
+        }
+
+
+        req.sessionToken =
+            token;
+
+
+        next();
+    }
+);
+
+
+// ========================================
+// STATIC WEBSITE
+// ========================================
+
+app.use(
+    express.static("public")
+);
+
+
+// ========================================
+// DELETE SESSION DIRECTORY
+// ========================================
+
+async function deleteSessionDirectory(
+    session
+) {
+
     try {
-        await rm(AUTH_DIR, {
-            recursive: true,
-            force: true
-        });
 
-        console.log("Auth directory deleted.");
+        await rm(
+            session.authDir,
+            {
+                recursive:
+                    true,
+
+                force:
+                    true
+            }
+        );
+
+
+        console.log(
+            `Session ${session.id}: auth deleted.`
+        );
 
     } catch (error) {
 
         console.error(
-            "Auth cleanup failed:",
+            `Session ${session.id}: auth cleanup failed:`,
             error
         );
     }
@@ -70,105 +275,450 @@ async function deleteAuth() {
 
 
 // ========================================
-// SESSION TIMEOUT
+// SESSION TIMER
 // ========================================
 
-function clearSessionTimer() {
+function clearSessionTimer(
+    session
+) {
 
-    if (sessionTimer) {
-        clearTimeout(sessionTimer);
-        sessionTimer = null;
+    if (
+        session.timer
+    ) {
+
+        clearTimeout(
+            session.timer
+        );
+
+        session.timer =
+            null;
     }
 }
 
 
-function startSessionTimer() {
+function resetSessionTimer(
+    session
+) {
 
-    clearSessionTimer();
-
-    sessionTimer = setTimeout(
-        async () => {
-
-            console.log(
-                "Pairing session timed out."
-            );
-
-            await finishSession();
-
-        },
-        10 * 60 * 1000
+    clearSessionTimer(
+        session
     );
+
+
+    session.timer =
+        setTimeout(
+            async () => {
+
+                console.log(
+                    `Session ${session.id}: timed out.`
+                );
+
+
+                await endSession(
+                    session,
+                    true
+                );
+
+            },
+            SESSION_TIMEOUT_MS
+        );
 }
 
 
 // ========================================
-// FINISH SESSION
+// CREATE SESSION
 // ========================================
 
-async function finishSession() {
+function createSession(
+    token
+) {
 
-    if (cleaningUp) {
+    const sessionId =
+        randomBytes(12)
+            .toString("hex");
+
+
+    const session = {
+
+        id:
+            sessionId,
+
+        token,
+
+        authDir:
+            `${SESSIONS_DIR}/${sessionId}`,
+
+        client:
+            null,
+
+        connected:
+            false,
+
+        socketReady:
+            false,
+
+        pairingCode:
+            null,
+
+        phoneNumber:
+            null,
+
+        pairingRequested:
+            false,
+
+        cleaning:
+            false,
+
+        ended:
+            false,
+
+        timer:
+            null,
+
+        createdAt:
+            Date.now(),
+
+        lastActivity:
+            Date.now()
+    };
+
+
+    sessions.set(
+        token,
+        session
+    );
+
+
+    return session;
+}
+
+
+// ========================================
+// START BAILEYS FOR SESSION
+// ========================================
+
+async function startSessionSocket(
+    session
+) {
+
+    if (
+        session.ended ||
+        session.cleaning
+    ) {
+
+        throw new Error(
+            "Session is no longer active."
+        );
+    }
+
+
+    await mkdir(
+        session.authDir,
+        {
+            recursive:
+                true
+        }
+    );
+
+
+    const {
+        state,
+        saveCreds
+    } =
+        await useMultiFileAuthState(
+            session.authDir
+        );
+
+
+    const client =
+        makeWASocket({
+
+            auth:
+                state,
+
+            browser:
+                Browsers.macOS(
+                    "Safari"
+                ),
+
+            printQRInTerminal:
+                false,
+
+            logger:
+                pino({
+                    level:
+                        "silent"
+                })
+        });
+
+
+    session.client =
+        client;
+
+
+    client.ev.on(
+        "creds.update",
+        saveCreds
+    );
+
+
+    client.ev.on(
+        "connection.update",
+        async update => {
+
+            const {
+                connection,
+                lastDisconnect
+            } =
+                update;
+
+
+            // ==================================
+            // CONNECTING
+            // ==================================
+
+            if (
+                connection ===
+                "connecting"
+            ) {
+
+                session.socketReady =
+                    true;
+
+
+                console.log(
+                    `Session ${session.id}: socket ready.`
+                );
+            }
+
+
+            // ==================================
+            // CONNECTED
+            // ==================================
+
+            if (
+                connection ===
+                "open"
+            ) {
+
+                session.connected =
+                    true;
+
+                session.socketReady =
+                    true;
+
+                session.pairingCode =
+                    null;
+
+
+                console.log(
+                    `✅ Session ${session.id}: WhatsApp connected.`
+                );
+
+
+                resetSessionTimer(
+                    session
+                );
+            }
+
+
+            // ==================================
+            // CLOSED
+            // ==================================
+
+            if (
+                connection ===
+                "close"
+            ) {
+
+                const statusCode =
+                    lastDisconnect
+                        ?.error
+                        ?.output
+                        ?.statusCode;
+
+
+                console.log(
+                    `Session ${session.id}: connection closed (${statusCode}).`
+                );
+
+
+                session.connected =
+                    false;
+
+                session.socketReady =
+                    false;
+
+                session.client =
+                    null;
+
+
+                if (
+                    session.cleaning ||
+                    session.ended
+                ) {
+
+                    return;
+                }
+
+
+                // If WhatsApp deliberately
+                // logged the user out, destroy
+                // the session.
+
+                if (
+                    statusCode ===
+                    DisconnectReason.loggedOut
+                ) {
+
+                    await endSession(
+                        session,
+                        false
+                    );
+
+                    return;
+                }
+
+
+                // Any unexpected disconnect:
+                //
+                // Give this session a short chance
+                // to recover. If it doesn't, destroy
+                // the temporary session.
+
+                setTimeout(
+                    async () => {
+
+                        if (
+                            session.ended ||
+                            session.cleaning
+                        ) {
+                            return;
+                        }
+
+
+                        console.log(
+                            `Session ${session.id}: connection lost, ending session.`
+                        );
+
+
+                        await endSession(
+                            session,
+                            false
+                        );
+
+                    },
+                    3000
+                );
+            }
+
+        }
+    );
+
+
+    return {
+        client,
+        state
+    };
+}
+
+
+// ========================================
+// END SESSION
+// ========================================
+
+async function endSession(
+    session,
+    logout
+) {
+
+    if (
+        !session ||
+        session.ended ||
+        session.cleaning
+    ) {
+
         return;
     }
 
-    cleaningUp = true;
 
-    clearSessionTimer();
+    session.cleaning =
+        true;
 
-    const currentClient = client;
+
+    clearSessionTimer(
+        session
+    );
+
 
     console.log(
-        "Finishing temporary WhatsApp session..."
+        `Session ${session.id}: cleaning up...`
     );
 
 
     try {
 
-        if (currentClient) {
+        if (
+            logout &&
+            session.client
+        ) {
 
             try {
 
-                await currentClient.logout();
+                await session.client.logout();
 
                 console.log(
-                    "WhatsApp logout requested."
+                    `Session ${session.id}: WhatsApp logout requested.`
                 );
 
             } catch (error) {
 
                 console.log(
-                    "Logout returned:",
-                    error?.message || error
+                    `Session ${session.id}: logout result:`,
+                    error?.message ||
+                    error
                 );
             }
         }
 
     } finally {
 
-        client = null;
-
-        connected = false;
-        busy = false;
-        socketReady = false;
-
-        pairingCode = null;
+        session.ended =
+            true;
 
 
-        await deleteAuth();
+        session.cleaning =
+            false;
 
-        cleaningUp = false;
+
+        session.client =
+            null;
 
 
-        console.log(
-            "Session cleanup complete."
+        session.connected =
+            false;
+
+
+        session.socketReady =
+            false;
+
+
+        session.pairingCode =
+            null;
+
+
+        sessions.delete(
+            session.token
         );
 
 
-        setTimeout(
-            () => {
-                startWhatsApp();
-            },
-            1500
+        await deleteSessionDirectory(
+            session
+        );
+
+
+        console.log(
+            `✅ Session ${session.id}: released.`
         );
     }
 }
@@ -180,13 +730,95 @@ async function finishSession() {
 
 app.get(
     "/api/status",
-    (_req, res) => {
+    async (req, res) => {
 
-        res.json({
-            connected,
-            busy,
-            ready: socketReady,
-            pairingCode
+        const session =
+            sessions.get(
+                req.sessionToken
+            );
+
+
+        const activeCount =
+            sessions.size;
+
+
+        // ==================================
+        // THIS BROWSER HAS A SESSION
+        // ==================================
+
+        if (session) {
+
+            session.lastActivity =
+                Date.now();
+
+
+            resetSessionTimer(
+                session
+            );
+
+
+            return res.json({
+
+                connected:
+                    session.connected,
+
+                owner:
+                    true,
+
+                hasSession:
+                    true,
+
+                activeCount,
+
+                maxSessions:
+                    MAX_SESSIONS,
+
+                ready:
+                    !session.connected &&
+                    !session.pairingRequested &&
+                    session.socketReady,
+
+                pairingCode:
+                    session.pairingCode,
+
+                busy:
+                    false
+
+            });
+        }
+
+
+        // ==================================
+        // NEW BROWSER
+        // ==================================
+
+        return res.json({
+
+            connected:
+                false,
+
+            owner:
+                false,
+
+            hasSession:
+                false,
+
+            activeCount,
+
+            maxSessions:
+                MAX_SESSIONS,
+
+            ready:
+                activeCount <
+                MAX_SESSIONS,
+
+            pairingCode:
+                null,
+
+            busy:
+                activeCount >=
+                MAX_SESSIONS
+
         });
     }
 );
@@ -200,115 +832,249 @@ app.post(
     "/api/pair",
     async (req, res) => {
 
-        try {
+        const token =
+            req.sessionToken;
 
-            if (busy) {
 
-                return res.status(409).json({
-                    ok: false,
-                    error:
-                        "Another session is already active."
+        // ==================================
+        // EXISTING SESSION
+        // ==================================
+
+        let session =
+            sessions.get(
+                token
+            );
+
+
+        if (session) {
+
+            if (
+                session.pairingCode
+            ) {
+
+                return res.json({
+
+                    ok:
+                        true,
+
+                    code:
+                        session.pairingCode
+
                 });
             }
-
-
-            if (connected) {
-
-                return res.status(409).json({
-                    ok: false,
-                    error:
-                        "WhatsApp is already connected."
-                });
-            }
-
-
-            if (!client) {
-
-                return res.status(503).json({
-                    ok: false,
-                    error:
-                        "WhatsApp socket is not ready."
-                });
-            }
-
-
-            if (!socketReady) {
-
-                return res.status(503).json({
-                    ok: false,
-                    error:
-                        "WhatsApp connection is still starting. Try again in a moment."
-                });
-            }
-
-
-            let number =
-                String(
-                    req.body?.number || ""
-                )
-                .replace(/\D/g, "");
 
 
             if (
-                number.length < 8 ||
-                number.length > 15
+                session.connected
             ) {
 
-                return res.status(400).json({
-                    ok: false,
+                return res.status(409).json({
+
+                    ok:
+                        false,
+
                     error:
-                        "Enter a valid international phone number."
+                        "WhatsApp is already connected."
+
                 });
             }
 
 
-            busy = true;
+            if (
+                session.pairingRequested
+            ) {
+
+                return res.status(409).json({
+
+                    ok:
+                        false,
+
+                    error:
+                        "Pairing is already in progress."
+
+                });
+            }
+        }
 
 
-            console.log(
-                `Requesting pairing code for ${number}`
+        // ==================================
+        // MAXIMUM SESSIONS
+        // ==================================
+
+        if (
+            !session &&
+            sessions.size >=
+                MAX_SESSIONS
+        ) {
+
+            return res.status(429).json({
+
+                ok:
+                    false,
+
+                error:
+                    "Maximum number of active users reached. Please try again later."
+
+            });
+        }
+
+
+        // ==================================
+        // PHONE NUMBER
+        // ==================================
+
+        const number =
+            String(
+                req.body?.number ||
+                ""
+            )
+            .replace(
+                /\D/g,
+                ""
             );
 
+
+        if (
+            number.length < 8 ||
+            number.length > 15
+        ) {
+
+            return res.status(400).json({
+
+                ok:
+                    false,
+
+                error:
+                    "Enter a valid international phone number with country code."
+
+            });
+        }
+
+
+        // ==================================
+        // CREATE SESSION
+        // ==================================
+
+        if (!session) {
+
+            session =
+                createSession(
+                    token
+                );
+        }
+
+
+        session.phoneNumber =
+            number;
+
+        session.pairingRequested =
+            true;
+
+        session.lastActivity =
+            Date.now();
+
+
+        resetSessionTimer(
+            session
+        );
+
+
+        try {
+
+            // ==================================
+            // START SOCKET
+            // ==================================
+
+            await startSessionSocket(
+                session
+            );
+
+
+            /*
+             * Wait until Baileys emits a QR
+             * internally.
+             *
+             * We do NOT expose this QR.
+             *
+             * This gives requestPairingCode()
+             * the socket readiness it expects.
+             */
+
+            if (
+                !session.connected
+            ) {
+
+                try {
+
+                    await session.client
+                        .waitForConnectionUpdate(
+                            update =>
+                                !!update.qr
+                        );
+
+                } catch {
+                    // Continue below.
+                }
+            }
+
+
+            // ==================================
+            // REQUEST CODE
+            // ==================================
 
             const code =
-                await client.requestPairingCode(
-                    number
-                );
+                await session.client
+                    .requestPairingCode(
+                        number
+                    );
 
 
-            pairingCode = code;
+            session.pairingCode =
+                code;
+
+
+            session.pairingRequested =
+                false;
 
 
             console.log(
-                `PAIRING CODE: ${code}`
+                `Session ${session.id}: PAIRING CODE ${code}`
             );
-
-
-            startSessionTimer();
 
 
             return res.json({
-                ok: true,
+
+                ok:
+                    true,
+
                 code
+
             });
 
 
         } catch (error) {
 
-            busy = false;
-            pairingCode = null;
-
             console.error(
-                "Pairing-code error:",
+                `Session ${session.id}: pairing error:`,
                 error
             );
 
 
+            await endSession(
+                session,
+                true
+            );
+
+
             return res.status(500).json({
-                ok: false,
+
+                ok:
+                    false,
+
                 error:
                     error?.message ||
-                    "Could not generate pairing code."
+                    "Failed to generate pairing code."
+
             });
         }
     }
@@ -325,70 +1091,142 @@ app.post(
 
     async (req, res) => {
 
-        try {
-
-            if (!connected || !client) {
-
-                return res.status(400).json({
-                    ok: false,
-                    error:
-                        "WhatsApp is not connected."
-                });
-            }
-
-
-            if (!req.file) {
-
-                return res.status(400).json({
-                    ok: false,
-                    error:
-                        "Please select an image."
-                });
-            }
-
-
-            console.log(
-                "Updating profile picture..."
+        const session =
+            sessions.get(
+                req.sessionToken
             );
 
+
+        // ==================================
+        // SESSION NOT FOUND
+        // ==================================
+
+        if (
+            !session
+        ) {
+
+            return res.status(403).json({
+
+                ok:
+                    false,
+
+                error:
+                    "Your session has expired."
+
+            });
+        }
+
+
+        session.lastActivity =
+            Date.now();
+
+
+        resetSessionTimer(
+            session
+        );
+
+
+        // ==================================
+        // NOT CONNECTED
+        // ==================================
+
+        if (
+            !session.connected ||
+            !session.client
+        ) {
+
+            return res.status(400).json({
+
+                ok:
+                    false,
+
+                error:
+                    "WhatsApp is not connected."
+
+            });
+        }
+
+
+        // ==================================
+        // NO IMAGE
+        // ==================================
+
+        if (
+            !req.file
+        ) {
+
+            return res.status(400).json({
+
+                ok:
+                    false,
+
+                error:
+                    "Please select an image."
+
+            });
+        }
+
+
+        try {
+
+            console.log(
+                `Session ${session.id}: updating profile picture...`
+            );
+
+
+            // ==================================
+            // FULL PP
+            // ==================================
 
             await updateFullPP(
                 req.file.buffer,
-                client
+                session.client
             );
 
 
             console.log(
-                "Profile picture updated."
+                `✅ Session ${session.id}: profile picture updated.`
             );
 
 
-            // Only AFTER successful PP update
-            // do we destroy the session.
+            // ==================================
+            // LOGOUT + CLEANUP
+            // ==================================
 
-            await finishSession();
+            await endSession(
+                session,
+                true
+            );
 
 
             return res.json({
-                ok: true,
+
+                ok:
+                    true,
+
                 message:
                     "Profile picture updated successfully."
+
             });
 
 
         } catch (error) {
 
             console.error(
-                "Profile-picture update error:",
+                `Session ${session.id}: PP update failed:`,
                 error
             );
 
 
             return res.status(500).json({
-                ok: false,
+
+                ok:
+                    false,
+
                 error:
                     error?.message ||
-                    "Profile-picture update failed."
+                    "Profile picture update failed."
+
             });
         }
     }
@@ -396,236 +1234,7 @@ app.post(
 
 
 // ========================================
-// WHATSAPP
-// ========================================
-
-async function startWhatsApp() {
-
-    if (starting || client || cleaningUp) {
-        return;
-    }
-
-    starting = true;
-
-    try {
-
-        const {
-            state,
-            saveCreds
-        } = await useMultiFileAuthState(
-            AUTH_DIR
-        );
-
-
-        client = makeWASocket({
-
-            auth: state,
-
-            browser:
-                Browsers.macOS("Safari"),
-
-            printQRInTerminal: false,
-
-            logger:
-                pino({
-                    level: "silent"
-                })
-        });
-
-
-        client.ev.on(
-            "creds.update",
-            async (creds) => {
-
-                await saveCreds(creds);
-
-
-                // WhatsApp has completed
-                // registration/linking.
-
-                if (
-                    creds.registered === true
-                ) {
-
-                    console.log(
-                        "WhatsApp credentials are now registered."
-                    );
-                }
-            }
-        );
-
-
-        client.ev.on(
-            "connection.update",
-            async (update) => {
-
-                const {
-                    connection,
-                    lastDisconnect
-                } = update;
-
-
-                // ==================================
-                // CONNECTION READY
-                // ==================================
-
-                if (
-                    connection === "connecting"
-                ) {
-
-                    socketReady = true;
-
-                    console.log(
-                        "WhatsApp socket ready."
-                    );
-                }
-
-
-                // ==================================
-                // CONNECTED
-                // ==================================
-
-                if (
-                    connection === "open"
-                ) {
-
-                    connected = true;
-                    socketReady = true;
-                    starting = false;
-
-                    pairingCode = null;
-
-                    console.log(
-                        "✅ WhatsApp connected!"
-                    );
-                }
-
-
-                // ==================================
-                // CLOSED
-                // ==================================
-
-                if (
-                    connection === "close"
-                ) {
-
-                    const statusCode =
-                        lastDisconnect
-                            ?.error
-                            ?.output
-                            ?.statusCode;
-
-
-                    console.log(
-                        `WhatsApp connection closed. Status: ${statusCode}`
-                    );
-
-
-                    connected = false;
-                    socketReady = false;
-
-                    const currentClient =
-                        client;
-
-
-                    client = null;
-
-
-                    if (cleaningUp) {
-                        return;
-                    }
-
-
-                    // ==============================
-                    // LOGGED OUT
-                    // ==============================
-
-                    if (
-                        statusCode ===
-                        DisconnectReason.loggedOut
-                    ) {
-
-                        console.log(
-                            "WhatsApp session logged out."
-                        );
-
-
-                        busy = false;
-                        pairingCode = null;
-
-                        await deleteAuth();
-
-
-                        setTimeout(
-                            () => {
-                                startWhatsApp();
-                            },
-                            1500
-                        );
-
-
-                        return;
-                    }
-
-
-                    // ==============================
-                    // NORMAL CONNECTION FAILURE
-                    // ==============================
-
-                    if (currentClient) {
-
-                        console.log(
-                            "Temporary connection failure."
-                        );
-                    }
-
-
-                    // IMPORTANT:
-                    // DO NOT delete auth here.
-                    //
-                    // The pairing process may still
-                    // need those credentials.
-
-
-                    setTimeout(
-                        () => {
-                            startWhatsApp();
-                        },
-                        2000
-                    );
-                }
-
-            }
-        );
-
-
-        starting = false;
-
-
-    } catch (error) {
-
-        starting = false;
-
-        console.error(
-            "WhatsApp startup error:",
-            error
-        );
-
-
-        // Don't destroy auth automatically.
-
-        setTimeout(
-            () => {
-                startWhatsApp();
-            },
-            3000
-        );
-    }
-}
-
-
-// ========================================
-// START SERVER
+// SERVER
 // ========================================
 
 app.listen(
@@ -634,9 +1243,11 @@ app.listen(
     () => {
 
         console.log(
-            `Web UI running on port ${PORT}`
+            `StarkFullPP running on port ${PORT}`
         );
 
-        startWhatsApp();
+        console.log(
+            `Maximum simultaneous sessions: ${MAX_SESSIONS}`
+        );
     }
 );
