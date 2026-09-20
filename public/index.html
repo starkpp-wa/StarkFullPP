@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>WhatsApp Full PP</title>
+
+    <style>
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            padding: 20px;
+
+            display: flex;
+            justify-content: center;
+            align-items: center;
+
+            font-family: Arial, sans-serif;
+
+            background: #111;
+            color: white;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 500px;
+
+            padding: 30px;
+
+            border-radius: 18px;
+
+            background: #1c1c1c;
+
+            border: 1px solid #333;
+        }
+
+        h1 {
+            margin: 0 0 8px 0;
+            text-align: center;
+        }
+
+        .subtitle {
+            margin-bottom: 25px;
+
+            text-align: center;
+
+            color: #999;
+        }
+
+        .status {
+            padding: 13px;
+            margin-bottom: 20px;
+
+            border-radius: 10px;
+
+            background: #292929;
+
+            text-align: center;
+
+            font-weight: bold;
+        }
+
+        label {
+            display: block;
+
+            margin-bottom: 8px;
+
+            font-weight: bold;
+        }
+
+        input[type="text"] {
+            width: 100%;
+
+            padding: 13px;
+
+            margin-bottom: 12px;
+
+            border-radius: 10px;
+
+            border: 1px solid #444;
+
+            background: #111;
+
+            color: white;
+
+            font-size: 16px;
+
+            outline: none;
+        }
+
+        input[type="file"] {
+            width: 100%;
+
+            margin:
+                10px 0 20px 0;
+        }
+
+        button {
+            width: 100%;
+
+            padding: 14px;
+
+            border: none;
+
+            border-radius: 10px;
+
+            font-size: 16px;
+
+            font-weight: bold;
+
+            cursor: pointer;
+
+            background: white;
+
+            color: #111;
+        }
+
+        button:disabled {
+            opacity: 0.45;
+
+            cursor: not-allowed;
+        }
+
+        .pairing-box {
+            margin: 20px 0;
+
+            padding: 20px;
+
+            background: #111;
+
+            border-radius: 12px;
+
+            text-align: center;
+        }
+
+        .pairing-title {
+            margin-bottom: 10px;
+
+            color: #999;
+        }
+
+        .pairing-code {
+            font-size: 30px;
+
+            font-weight: bold;
+
+            letter-spacing: 5px;
+
+            word-break: break-all;
+        }
+
+        .instructions {
+            margin-top: 15px;
+
+            color: #999;
+
+            font-size: 14px;
+
+            line-height: 1.5;
+        }
+
+        #uploadSection {
+            margin-top: 28px;
+
+            padding-top: 25px;
+
+            border-top: 1px solid #333;
+        }
+
+        #message {
+            min-height: 22px;
+
+            margin-top: 15px;
+
+            text-align: center;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+    </style>
+
+</head>
+
+
+<body>
+
+
+<div class="container">
+
+    <h1>
+        WhatsApp Full PP
+    </h1>
+
+
+    <div class="subtitle">
+        Full-size profile picture tool
+    </div>
+
+
+    <!-- STATUS -->
+
+    <div
+        id="status"
+        class="status"
+    >
+        Starting WhatsApp...
+    </div>
+
+
+    <!-- LOGIN -->
+
+    <div id="loginSection">
+
+        <label for="phone">
+            WhatsApp Phone Number
+        </label>
+
+
+        <input
+            id="phone"
+            type="text"
+            placeholder="919876543210"
+            autocomplete="off"
+        >
+
+
+        <button
+            id="pairButton"
+            type="button"
+            disabled
+        >
+            Generate Pairing Code
+        </button>
+
+
+        <div
+            id="pairingBox"
+            class="pairing-box hidden"
+        >
+
+            <div class="pairing-title">
+                Pairing Code
+            </div>
+
+
+            <div
+                id="pairingCode"
+                class="pairing-code"
+            >
+                --------
+            </div>
+
+
+            <div class="instructions">
+
+                On your phone:
+
+                <br><br>
+
+                <b>
+                    WhatsApp → Settings → Linked Devices
+                </b>
+
+                <br><br>
+
+                Select:
+
+                <br>
+
+                <b>
+                    Link a Device → Link with phone number instead
+                </b>
+
+                <br><br>
+
+                Enter the code shown above.
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- UPLOAD -->
+
+    <div
+        id="uploadSection"
+        class="hidden"
+    >
+
+        <label for="image">
+            Choose Profile Picture
+        </label>
+
+
+        <input
+            id="image"
+            type="file"
+            accept="image/*"
+        >
+
+
+        <button
+            id="uploadButton"
+            type="button"
+        >
+            Update Profile Picture
+        </button>
+
+    </div>
+
+
+    <div id="message"></div>
+
+</div>
+
+
+<script>
+
+    const status =
+        document.getElementById("status");
+
+    const loginSection =
+        document.getElementById("loginSection");
+
+    const uploadSection =
+        document.getElementById("uploadSection");
+
+    const phone =
+        document.getElementById("phone");
+
+    const pairButton =
+        document.getElementById("pairButton");
+
+    const pairingBox =
+        document.getElementById("pairingBox");
+
+    const pairingCode =
+        document.getElementById("pairingCode");
+
+    const image =
+        document.getElementById("image");
+
+    const uploadButton =
+        document.getElementById("uploadButton");
+
+    const message =
+        document.getElementById("message");
+
+
+    let connected = false;
+
+
+    // ====================================
+    // STATUS
+    // ====================================
+
+    async function refreshStatus() {
+
+        try {
+
+            const response =
+                await fetch("/api/status", {
+                    cache: "no-store"
+                });
+
+
+            const data =
+                await response.json();
+
+
+            // ==================================
+            // CONNECTED
+            // ==================================
+
+            if (data.connected) {
+
+                connected = true;
+
+
+                status.textContent =
+                    "✅ WhatsApp Connected";
+
+
+                loginSection.classList.add(
+                    "hidden"
+                );
+
+
+                uploadSection.classList.remove(
+                    "hidden"
+                );
+
+
+                pairButton.disabled =
+                    true;
+
+
+                return;
+            }
+
+
+            // ==================================
+            // BUSY / PAIRING
+            // ==================================
+
+            if (data.busy) {
+
+                connected = false;
+
+
+                status.textContent =
+                    "🟡 Pairing in progress...";
+
+
+                pairButton.disabled =
+                    true;
+
+
+                uploadSection.classList.add(
+                    "hidden"
+                );
+
+
+                if (data.pairingCode) {
+
+                    pairingCode.textContent =
+                        data.pairingCode;
+
+
+                    pairingBox.classList.remove(
+                        "hidden"
+                    );
+                }
+
+
+                return;
+            }
+
+
+            // ==================================
+            // READY
+            // ==================================
+
+            connected = false;
+
+
+            if (data.ready) {
+
+                status.textContent =
+                    "🟢 Ready for pairing";
+
+                pairButton.disabled =
+                    false;
+
+            } else {
+
+                status.textContent =
+                    "Connecting to WhatsApp...";
+
+                pairButton.disabled =
+                    true;
+            }
+
+
+            uploadSection.classList.add(
+                "hidden"
+            );
+
+        }
+
+
+        catch (error) {
+
+            connected = false;
+
+            pairButton.disabled =
+                true;
+
+
+            uploadSection.classList.add(
+                "hidden"
+            );
+
+
+            status.textContent =
+                "❌ Server unavailable";
+
+        }
+
+    }
+
+
+    // ====================================
+    // GENERATE PAIRING CODE
+    // ====================================
+
+    pairButton.addEventListener(
+        "click",
+        async () => {
+
+            const number =
+                phone.value.trim();
+
+
+            if (!number) {
+
+                message.textContent =
+                    "❌ Enter your phone number.";
+
+                return;
+            }
+
+
+            pairButton.disabled =
+                true;
+
+
+            message.textContent =
+                "Generating pairing code...";
+
+
+            pairingBox.classList.add(
+                "hidden"
+            );
+
+
+            try {
+
+                const response =
+                    await fetch(
+                        "/api/pair",
+                        {
+                            method: "POST",
+
+                            headers: {
+                                "Content-Type":
+                                    "application/json"
+                            },
+
+                            body:
+                                JSON.stringify({
+                                    number
+                                })
+                        }
+                    );
+
+
+                const data =
+                    await response.json();
+
+
+                if (!data.ok) {
+
+                    message.textContent =
+                        "❌ " +
+                        data.error;
+
+                    pairButton.disabled =
+                        false;
+
+                    return;
+                }
+
+
+                pairingCode.textContent =
+                    data.code;
+
+
+                pairingBox.classList.remove(
+                    "hidden"
+                );
+
+
+                message.textContent =
+                    "✅ Pairing code generated.";
+
+            }
+
+
+            catch (error) {
+
+                console.error(error);
+
+
+                message.textContent =
+                    "❌ Failed to contact server.";
+
+
+                pairButton.disabled =
+                    false;
+
+            }
+
+        }
+    );
+
+
+    // ====================================
+    // UPDATE PROFILE PICTURE
+    // ====================================
+
+    uploadButton.addEventListener(
+        "click",
+        async () => {
+
+            if (!connected) {
+
+                message.textContent =
+                    "❌ WhatsApp is not connected.";
+
+                return;
+            }
+
+
+            if (!image.files.length) {
+
+                message.textContent =
+                    "❌ Select an image.";
+
+                return;
+            }
+
+
+            uploadButton.disabled =
+                true;
+
+
+            message.textContent =
+                "Updating profile picture...";
+
+
+            const formData =
+                new FormData();
+
+
+            formData.append(
+                "image",
+                image.files[0]
+            );
+
+
+            try {
+
+                const response =
+                    await fetch(
+                        "/api/update-pp",
+                        {
+                            method: "POST",
+
+                            body:
+                                formData
+                        }
+                    );
+
+
+                const data =
+                    await response.json();
+
+
+                if (data.ok) {
+
+                    message.textContent =
+                        "✅ " +
+                        data.message;
+
+
+                    image.value = "";
+
+                }
+
+                else {
+
+                    message.textContent =
+                        "❌ " +
+                        data.error;
+
+                }
+
+            }
+
+
+            catch (error) {
+
+                console.error(error);
+
+
+                message.textContent =
+                    "❌ Upload failed.";
+
+            }
+
+
+            finally {
+
+                uploadButton.disabled =
+                    false;
+
+            }
+
+        }
+    );
+
+
+    // ====================================
+    // START STATUS CHECK
+    // ====================================
+
+    refreshStatus();
+
+
+    setInterval(
+        refreshStatus,
+        1000
+    );
+
+</script>
+
+
+</body>
+
+</html>
