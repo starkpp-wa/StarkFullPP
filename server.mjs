@@ -20,35 +20,23 @@ import makeWASocket, {
 import { updateFullPP } from "./fullpp.js";
 
 
-const app = express();
-
-
-const PORT =
-    process.env.PORT || 3000;
-
-
 // ========================================
 // CONFIG
 // ========================================
 
+const app = express();
+
+const PORT =
+    process.env.PORT || 3000;
+
 const SESSIONS_DIR =
     "./sessions";
 
-
-// Maximum simultaneous WhatsApp users.
-//
-// Change this later if necessary.
-
-const MAX_SESSIONS = 3;
-
-
-// How long an unused session may live.
+const MAX_SESSIONS =
+    3;
 
 const SESSION_TIMEOUT_MS =
     10 * 60 * 1000;
-
-
-// Browser cookie name.
 
 const SESSION_COOKIE =
     "starkpp_session";
@@ -58,9 +46,7 @@ const SESSION_COOKIE =
 // EXPRESS
 // ========================================
 
-app.use(
-    express.json()
-);
+app.use(express.json());
 
 
 // ========================================
@@ -69,28 +55,18 @@ app.use(
 
 const upload =
     multer({
-
         storage:
             multer.memoryStorage(),
 
         limits: {
-
             fileSize:
                 15 * 1024 * 1024
         }
-
     });
 
 
 // ========================================
 // SESSION STORE
-// ========================================
-//
-// Every browser/user gets a unique token.
-//
-// Map:
-// token -> session
-//
 // ========================================
 
 const sessions =
@@ -98,7 +74,7 @@ const sessions =
 
 
 // ========================================
-// COOKIE
+// COOKIE HELPERS
 // ========================================
 
 function getSessionToken(req) {
@@ -106,27 +82,22 @@ function getSessionToken(req) {
     const cookieHeader =
         req.headers.cookie || "";
 
-
     const cookies =
         cookieHeader
             .split(";")
             .map(
-                item =>
-                    item.trim()
+                item => item.trim()
             )
             .filter(Boolean);
-
 
     for (const cookie of cookies) {
 
         const separator =
             cookie.indexOf("=");
 
-
         if (separator === -1) {
             continue;
         }
-
 
         const name =
             cookie.slice(
@@ -134,30 +105,22 @@ function getSessionToken(req) {
                 separator
             );
 
-
         const value =
             cookie.slice(
                 separator + 1
             );
 
-
         if (
             name ===
             SESSION_COOKIE
         ) {
-
             return value;
         }
     }
 
-
     return null;
 }
 
-
-// ========================================
-// CREATE RANDOM TOKEN
-// ========================================
 
 function createToken() {
 
@@ -165,10 +128,6 @@ function createToken() {
         .toString("hex");
 }
 
-
-// ========================================
-// SET COOKIE
-// ========================================
 
 function setSessionCookie(
     res,
@@ -178,16 +137,13 @@ function setSessionCookie(
     let cookie =
         `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`;
 
+    const isHttps =
+        process.env.NODE_ENV === "production" ||
+        process.env.RENDER === "true";
 
-    if (
-        process.env.RENDER ===
-        "true"
-    ) {
-
-        cookie +=
-            "; Secure";
+    if (isHttps) {
+        cookie += "; Secure";
     }
-
 
     res.setHeader(
         "Set-Cookie",
@@ -206,12 +162,10 @@ app.use(
         let token =
             getSessionToken(req);
 
-
         if (!token) {
 
             token =
                 createToken();
-
 
             setSessionCookie(
                 res,
@@ -219,10 +173,8 @@ app.use(
             );
         }
 
-
         req.sessionToken =
             token;
-
 
         next();
     }
@@ -239,7 +191,7 @@ app.use(
 
 
 // ========================================
-// DELETE SESSION DIRECTORY
+// DELETE SESSION AUTH
 // ========================================
 
 async function deleteSessionDirectory(
@@ -258,7 +210,6 @@ async function deleteSessionDirectory(
                     true
             }
         );
-
 
         console.log(
             `Session ${session.id}: auth deleted.`
@@ -304,7 +255,6 @@ function resetSessionTimer(
         session
     );
 
-
     session.timer =
         setTimeout(
             async () => {
@@ -312,7 +262,6 @@ function resetSessionTimer(
                 console.log(
                     `Session ${session.id}: timed out.`
                 );
-
 
                 await endSession(
                     session,
@@ -336,7 +285,6 @@ function createSession(
     const sessionId =
         randomBytes(12)
             .toString("hex");
-
 
     const session = {
 
@@ -366,6 +314,9 @@ function createSession(
         pairingRequested:
             false,
 
+        restarting:
+            false,
+
         cleaning:
             false,
 
@@ -375,6 +326,12 @@ function createSession(
         timer:
             null,
 
+        qrPromise:
+            null,
+
+        qrResolve:
+            null,
+
         createdAt:
             Date.now(),
 
@@ -382,19 +339,17 @@ function createSession(
             Date.now()
     };
 
-
     sessions.set(
         token,
         session
     );
-
 
     return session;
 }
 
 
 // ========================================
-// START BAILEYS FOR SESSION
+// START SOCKET
 // ========================================
 
 async function startSessionSocket(
@@ -428,6 +383,23 @@ async function startSessionSocket(
         await useMultiFileAuthState(
             session.authDir
         );
+
+
+    // Promise used only by the initial
+    // pairing-code request.
+
+    let resolveQR;
+
+    session.qrPromise =
+        new Promise(
+            resolve => {
+                resolveQR =
+                    resolve;
+            }
+        );
+
+    session.qrResolve =
+        resolveQR;
 
 
     const client =
@@ -468,26 +440,37 @@ async function startSessionSocket(
 
             const {
                 connection,
-                lastDisconnect
+                lastDisconnect,
+                qr
             } =
                 update;
 
 
             // ==================================
-            // CONNECTING
+            // QR READY
             // ==================================
 
-            if (
-                connection ===
-                "connecting"
-            ) {
+            if (qr) {
 
                 session.socketReady =
                     true;
 
 
+                if (
+                    session.qrResolve
+                ) {
+
+                    session.qrResolve(
+                        qr
+                    );
+
+                    session.qrResolve =
+                        null;
+                }
+
+
                 console.log(
-                    `Session ${session.id}: socket ready.`
+                    `Session ${session.id}: pairing socket ready.`
                 );
             }
 
@@ -501,11 +484,26 @@ async function startSessionSocket(
                 "open"
             ) {
 
+                // Ignore events from an old
+                // socket after a restart.
+
+                if (
+                    session.client !==
+                    client
+                ) {
+
+                    return;
+                }
+
+
                 session.connected =
                     true;
 
                 session.socketReady =
                     true;
+
+                session.restarting =
+                    false;
 
                 session.pairingCode =
                     null;
@@ -543,6 +541,18 @@ async function startSessionSocket(
                 );
 
 
+                // Old socket event?
+                // Ignore it.
+
+                if (
+                    session.client !==
+                    client
+                ) {
+
+                    return;
+                }
+
+
                 session.connected =
                     false;
 
@@ -562,9 +572,90 @@ async function startSessionSocket(
                 }
 
 
-                // If WhatsApp deliberately
-                // logged the user out, destroy
-                // the session.
+                // ==================================
+                // 515 = RESTART REQUIRED
+                // ==================================
+
+                if (
+                    statusCode ===
+                    DisconnectReason.restartRequired
+                ) {
+
+                    if (
+                        session.restarting
+                    ) {
+
+                        return;
+                    }
+
+
+                    session.restarting =
+                        true;
+
+
+                    console.log(
+                        `Session ${session.id}: 515 restart required. Keeping auth.`
+                    );
+
+
+                    setTimeout(
+                        async () => {
+
+                            if (
+                                session.ended ||
+                                session.cleaning
+                            ) {
+
+                                return;
+                            }
+
+
+                            try {
+
+                                await startSessionSocket(
+                                    session
+                                );
+
+
+                                session.restarting =
+                                    false;
+
+
+                                console.log(
+                                    `Session ${session.id}: socket restarted with same auth.`
+                                );
+
+
+                            } catch (error) {
+
+                                session.restarting =
+                                    false;
+
+
+                                console.error(
+                                    `Session ${session.id}: restart failed:`,
+                                    error
+                                );
+
+
+                                await endSession(
+                                    session,
+                                    false
+                                );
+                            }
+
+                        },
+                        1000
+                    );
+
+
+                    return;
+                }
+
+
+                // ==================================
+                // LOGGED OUT
+                // ==================================
 
                 if (
                     statusCode ===
@@ -576,15 +667,19 @@ async function startSessionSocket(
                         false
                     );
 
+
                     return;
                 }
 
 
-                // Any unexpected disconnect:
-                //
-                // Give this session a short chance
-                // to recover. If it doesn't, destroy
-                // the temporary session.
+                // ==================================
+                // OTHER DISCONNECT
+                // ==================================
+
+                console.log(
+                    `Session ${session.id}: unexpected disconnect.`
+                );
+
 
                 setTimeout(
                     async () => {
@@ -593,19 +688,36 @@ async function startSessionSocket(
                             session.ended ||
                             session.cleaning
                         ) {
+
                             return;
                         }
 
 
-                        console.log(
-                            `Session ${session.id}: connection lost, ending session.`
-                        );
+                        try {
+
+                            await startSessionSocket(
+                                session
+                            );
 
 
-                        await endSession(
-                            session,
-                            false
-                        );
+                            console.log(
+                                `Session ${session.id}: socket reconnected.`
+                            );
+
+
+                        } catch (error) {
+
+                            console.error(
+                                `Session ${session.id}: reconnect failed:`,
+                                error
+                            );
+
+
+                            await endSession(
+                                session,
+                                false
+                            );
+                        }
 
                     },
                     3000
@@ -629,7 +741,7 @@ async function startSessionSocket(
 
 async function endSession(
     session,
-    logout
+    logout = false
 ) {
 
     if (
@@ -668,7 +780,7 @@ async function endSession(
                 await session.client.logout();
 
                 console.log(
-                    `Session ${session.id}: WhatsApp logout requested.`
+                    `Session ${session.id}: logout requested.`
                 );
 
             } catch (error) {
@@ -686,22 +798,14 @@ async function endSession(
         session.ended =
             true;
 
-
-        session.cleaning =
-            false;
-
-
         session.client =
             null;
-
 
         session.connected =
             false;
 
-
         session.socketReady =
             false;
-
 
         session.pairingCode =
             null;
@@ -715,6 +819,10 @@ async function endSession(
         await deleteSessionDirectory(
             session
         );
+
+
+        session.cleaning =
+            false;
 
 
         console.log(
@@ -743,18 +851,13 @@ app.get(
 
 
         // ==================================
-        // THIS BROWSER HAS A SESSION
+        // THIS USER HAS A SESSION
         // ==================================
 
         if (session) {
 
             session.lastActivity =
                 Date.now();
-
-
-            resetSessionTimer(
-                session
-            );
 
 
             return res.json({
@@ -774,22 +877,19 @@ app.get(
                     MAX_SESSIONS,
 
                 ready:
-                    !session.connected &&
-                    !session.pairingRequested &&
-                    session.socketReady,
+                    false,
 
                 pairingCode:
                     session.pairingCode,
 
                 busy:
                     false
-
             });
         }
 
 
         // ==================================
-        // NEW BROWSER
+        // NEW USER
         // ==================================
 
         return res.json({
@@ -818,14 +918,13 @@ app.get(
             busy:
                 activeCount >=
                 MAX_SESSIONS
-
         });
     }
 );
 
 
 // ========================================
-// REQUEST PAIRING CODE
+// PAIRING CODE
 // ========================================
 
 app.post(
@@ -836,33 +935,17 @@ app.post(
             req.sessionToken;
 
 
-        // ==================================
-        // EXISTING SESSION
-        // ==================================
-
         let session =
             sessions.get(
                 token
             );
 
 
+        // ==================================
+        // EXISTING SESSION
+        // ==================================
+
         if (session) {
-
-            if (
-                session.pairingCode
-            ) {
-
-                return res.json({
-
-                    ok:
-                        true,
-
-                    code:
-                        session.pairingCode
-
-                });
-            }
-
 
             if (
                 session.connected
@@ -875,7 +958,21 @@ app.post(
 
                     error:
                         "WhatsApp is already connected."
+                });
+            }
 
+
+            if (
+                session.pairingCode
+            ) {
+
+                return res.json({
+
+                    ok:
+                        true,
+
+                    code:
+                        session.pairingCode
                 });
             }
 
@@ -891,14 +988,13 @@ app.post(
 
                     error:
                         "Pairing is already in progress."
-
                 });
             }
         }
 
 
         // ==================================
-        // MAXIMUM SESSIONS
+        // SESSION LIMIT
         // ==================================
 
         if (
@@ -913,8 +1009,7 @@ app.post(
                     false,
 
                 error:
-                    "Maximum number of active users reached. Please try again later."
-
+                    "Maximum active users reached. Please try again later."
             });
         }
 
@@ -946,7 +1041,6 @@ app.post(
 
                 error:
                     "Enter a valid international phone number with country code."
-
             });
         }
 
@@ -982,7 +1076,7 @@ app.post(
         try {
 
             // ==================================
-            // START SOCKET
+            // CREATE SOCKET
             // ==================================
 
             await startSessionSocket(
@@ -990,36 +1084,42 @@ app.post(
             );
 
 
-            /*
-             * Wait until Baileys emits a QR
-             * internally.
-             *
-             * We do NOT expose this QR.
-             *
-             * This gives requestPairingCode()
-             * the socket readiness it expects.
-             */
+            // ==================================
+            // WAIT FOR QR EVENT
+            // ==================================
+            //
+            // We don't display the QR.
+            // We use it only as the signal that
+            // WhatsApp is ready for pairing code.
+            //
 
-            if (
-                !session.connected
-            ) {
+            await Promise.race([
 
-                try {
+                session.qrPromise,
 
-                    await session.client
-                        .waitForConnectionUpdate(
-                            update =>
-                                !!update.qr
+                new Promise(
+                    (_, reject) => {
+
+                        setTimeout(
+                            () => {
+
+                                reject(
+                                    new Error(
+                                        "Timed out waiting for WhatsApp pairing readiness."
+                                    )
+                                );
+
+                            },
+                            15000
                         );
+                    }
+                )
 
-                } catch {
-                    // Continue below.
-                }
-            }
+            ]);
 
 
             // ==================================
-            // REQUEST CODE
+            // REQUEST PAIRING CODE
             // ==================================
 
             const code =
@@ -1032,7 +1132,6 @@ app.post(
             session.pairingCode =
                 code;
 
-
             session.pairingRequested =
                 false;
 
@@ -1042,13 +1141,17 @@ app.post(
             );
 
 
+            resetSessionTimer(
+                session
+            );
+
+
             return res.json({
 
                 ok:
                     true,
 
                 code
-
             });
 
 
@@ -1062,7 +1165,7 @@ app.post(
 
             await endSession(
                 session,
-                true
+                false
             );
 
 
@@ -1074,7 +1177,6 @@ app.post(
                 error:
                     error?.message ||
                     "Failed to generate pairing code."
-
             });
         }
     }
@@ -1098,12 +1200,10 @@ app.post(
 
 
         // ==================================
-        // SESSION NOT FOUND
+        // SESSION CHECK
         // ==================================
 
-        if (
-            !session
-        ) {
+        if (!session) {
 
             return res.status(403).json({
 
@@ -1112,22 +1212,12 @@ app.post(
 
                 error:
                     "Your session has expired."
-
             });
         }
 
 
-        session.lastActivity =
-            Date.now();
-
-
-        resetSessionTimer(
-            session
-        );
-
-
         // ==================================
-        // NOT CONNECTED
+        // CONNECTION CHECK
         // ==================================
 
         if (
@@ -1142,18 +1232,15 @@ app.post(
 
                 error:
                     "WhatsApp is not connected."
-
             });
         }
 
 
         // ==================================
-        // NO IMAGE
+        // IMAGE CHECK
         // ==================================
 
-        if (
-            !req.file
-        ) {
+        if (!req.file) {
 
             return res.status(400).json({
 
@@ -1162,7 +1249,6 @@ app.post(
 
                 error:
                     "Please select an image."
-
             });
         }
 
@@ -1173,10 +1259,6 @@ app.post(
                 `Session ${session.id}: updating profile picture...`
             );
 
-
-            // ==================================
-            // FULL PP
-            // ==================================
 
             await updateFullPP(
                 req.file.buffer,
@@ -1206,7 +1288,6 @@ app.post(
 
                 message:
                     "Profile picture updated successfully."
-
             });
 
 
@@ -1226,7 +1307,6 @@ app.post(
                 error:
                     error?.message ||
                     "Profile picture update failed."
-
             });
         }
     }
@@ -1234,7 +1314,7 @@ app.post(
 
 
 // ========================================
-// SERVER
+// START SERVER
 // ========================================
 
 app.listen(
